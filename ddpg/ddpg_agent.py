@@ -25,6 +25,9 @@ class OUNoise(object):
     def reset(self):
         self.x_prev = self.x0 if self.x0 is not None else np.zeros_like(self.mean)
 
+    def __repr__(self):
+        return 'OrnsteinUhlenbeckActionNoise(mu={}, sigma={})'.format(
+                                                            self.mean, self.sigma)
 
 class ReplayBuffer(object):
     def __init__(self, size, input_shape, n_actions):
@@ -42,13 +45,19 @@ class ReplayBuffer(object):
         self.new_state[index] = new_state
         self.action[index] = action
         self.reward[index] = reward
-        self.terminal_memory = 1-done
+        self.terminal_memory[index] = 1-done
         self.counter += 1
 
-    def sample(self):
-        index = np.random(min(self.counter, self.size))
-        return self.state[index], self.action[index], self.reward[index], self.new_state[index], self.terminal_memory[index]
+    def sample(self, batch_size):
+        index = np.random.choice(min(self.counter, self.size), batch_size)
 
+        state = self.state[index]
+        action = self.action[index]
+        reward = self.reward[index]
+        new_state = self.new_state[index]
+        # print(self.terminal_memory)
+        terminal_memory = self.terminal_memory[index]
+        return state,action, reward, new_state, terminal_memory
 
 class Critic(nn.Module):
     def __init__(self, input_shape, beta, n_actions, name, checkpoint='tmp/ddpg'):
@@ -57,23 +66,42 @@ class Critic(nn.Module):
         self.beta = beta
         self.input_shape = input_shape
         self.n_actions = n_actions
-        self.lay1_dims = 400
-        self.lay2_dims = 300
-        self.checkpoint_file = os.path.join(checkpoint,name+'_ddpg')
+        self.lay1_dims = 32
+        self.lay2_dims = 64
+        self.checkpoint = os.path.join(checkpoint,name+'_ddpg')
 
         self.fc1 = nn.Linear(*self.input_shape, self.lay1_dims)
+        self.bn1 = nn.LayerNorm(self.lay1_dims)
+        fc1 = 1.0/np.sqrt(self.fc1.weight.data.size()[0])
+
         self.fc2 = nn.Linear(self.lay1_dims, self.lay2_dims)
+        self.bn2 = nn.LayerNorm(self.lay2_dims)
+        fc2 = 1.0/np.sqrt(self.fc2.weight.data.size()[0])
+
         self.fc3 = nn.Linear(self.n_actions, self.lay2_dims)
+        fc3 = 0.003
+
         self.q = nn.Linear(self.lay2_dims, 1)
         self.optimizer = optim.Adam(self.parameters(), lr=beta)
-        self.device = T.device('cuda:0' if T.cuda.is_available() else 'cuda:1')
+        self.device = T.device('cuda' if T.cuda.is_available() else 'cpu')
+
+        T.nn.init.uniform_(self.fc1.weight.data, -fc1, fc1)
+        T.nn.init.uniform_(self.fc1.bias.data, -fc1, fc1)
+        T.nn.init.uniform_(self.fc2.weight.data, -fc2, fc2)
+        T.nn.init.uniform_(self.fc2.bias.data, -fc2, fc2)
+        T.nn.init.uniform_(self.q.weight.data, -fc3, fc3)
+        T.nn.init.uniform_(self.q.bias.data, -fc3, fc3)
+
+
 
         self.to(self.device)
 
     def forward(self, state, action):
         state_value = self.fc1(state)
-        state_value = F.re;u(state_value)
+        state_value = self.bn1(state_value)
+        state_value = F.relu(state_value)
         state_value = self.fc2(state_value)
+        state_value = self.bn2(state_value)
         action_value = F.relu(self.fc3(action))
         state_action_value = F.relu(T.add(state_value, action_value))
         state_action_value = self.q(state_action_value)
@@ -94,18 +122,32 @@ class Actor(nn.Module):
         self.n_actions = n_actions
         self.checkpoint = os.path.join(checkpoint,name+'_ddpg')
 
-        self.fc1 = nn.Linear(*input_shape, 400)
-        self.fc2 = nn.Linear(400,300)
-        self.policy = nn.Linear(300, self.n_actions)
-        self.optimizer = optim.Actor(self.parameters(), lr=alpha)
-        self.device = T.device('cuda:0' if T.cuda.is_available() else 'cuda:1')
+        self.fc1 = nn.Linear(*input_shape, 32)
+        self.bn1 = nn.LayerNorm(32)
+        fc1 = 1.0/np.sqrt(self.fc1.weight.data.size()[0])
+        self.fc2 = nn.Linear(32,64)
+        self.bn2 = nn.LayerNorm(64)
+        fc2 = 1.0/np.sqrt(self.fc2.weight.data.size()[0])
+        self.policy = nn.Linear(64, self.n_actions)
+        fc3 = 0.003
+        self.optimizer = optim.Adam(self.parameters(), lr=alpha)
+        self.device = T.device('cuda' if T.cuda.is_available() else 'cpu')
+
+        T.nn.init.uniform_(self.fc1.weight.data, -fc1, fc1)
+        T.nn.init.uniform_(self.fc1.bias.data, -fc1, fc1)
+        T.nn.init.uniform_(self.fc2.weight.data, -fc2, fc2)
+        T.nn.init.uniform_(self.fc2.bias.data, -fc2, fc2)
+        T.nn.init.uniform_(self.policy.weight.data, -fc3, fc3)
+        T.nn.init.uniform_(self.policy.bias.data, -fc3, fc3)
 
         self.to(self.device)
 
     def forward(self, state):
         x = self.fc1(state)
+        x = self.bn1(x)
         x - F.relu(x)
         x = self.fc2(x)
+        x = self.bn2(x)
         x = F.relu(x)
         action = T.tanh(self.policy(x))
 
@@ -114,28 +156,32 @@ class Actor(nn.Module):
     def save(self):
         T.save(self.state_dict(), self.checkpoint)
 
-    def load_checkpoint(self):
+    def load(self):
         self.load_state_dict(T.load(self.checkpoint))
 
 
 class Agent(object):
-    def __init__(self, alpha, beta, input_shape, tau, env, gamma=0.99, n_actions=2, size=100000, batch_size=64):
+    def __init__(self, alpha, beta, tau, env, gamma=0.99, size=100000, batch_size=64):
         self.gamma = gamma
         self.tau = tau
         self.batch_size = batch_size
+        self.env = env
+        self.input_shape = env.observation_space.shape[0]
+        self.n_actions = env.action_space.shape[0]
 
-        self.actor = Actor(input_shape, n_actions, alpha, 'Actor')
-        self.target_actor = Actor(input_shape, n_actions, alpha, 'TargetActor')
+        self.actor = Actor([self.input_shape], self.n_actions, alpha, 'Actor')
+        self.target_actor = Actor([self.input_shape], self.n_actions, alpha, 'TargetActor')
 
-        self.critic = Critic(input_shape, beta, n_actions, 'Critic')
-        self.target_critic = Critic(input_shape, beta, n_actions, 'TargetCritic')
+        self.critic = Critic([self.input_shape], beta, self.n_actions, 'Critic')
+        self.target_critic = Critic([self.input_shape], beta, self.n_actions, 'TargetCritic')
 
-        self.noise = OUNoise(np.zeros(n_actions))
+        self.noise = OUNoise(np.zeros(self.n_actions))
 
-        self.memory = ReplayBuffer(size, input_shape, n_actions)
+        self.memory = ReplayBuffer(size, [self.input_shape], self.n_actions)
+        self.update(tau=1)
 
 
-    def update(self, tau):
+    def update(self, tau=None):
         if tau is None:
             tau = self.tau
         
@@ -199,8 +245,9 @@ class Agent(object):
 
         self.update()
 
+
     def remember(self, state, action, reward, newstate, done):
-        self.memory.store(state, new_state, action, reward, done)
+        self.memory.store(state, newstate, action, reward, done)
 
     def choose_action(self, observation):
         self.actor.eval()
@@ -212,16 +259,16 @@ class Agent(object):
         return mu_prime.cpu().detach().numpy()
 
     def save_models(self):
-        self.actor.save_checkpoint()
-        self.target_actor.save_checkpoint()
-        self.critic.save_checkpoint()
-        self.target_critic.save_checkpoint()
+        self.actor.save()
+        self.target_actor.save()
+        self.critic.save()
+        self.target_critic.save()
 
     def load_models(self):
-        self.actor.load_checkpoint()
-        self.target_actor.load_checkpoint()
-        self.critic.load_checkpoint()
-        self.target_critic.load_checkpoint()
+        self.actor.load()
+        self.target_actor.load()
+        self.critic.load()
+        self.target_critic.load()
 
     def check_actor_params(self):
         current_actor_params = self.actor.named_parameters()

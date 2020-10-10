@@ -17,32 +17,40 @@ def plotLearning(scores, filename, x=None, window=5):
 
 if __name__=='__main__':
     env = gym.make('LunarLanderContinuous-v2')
-    agent = Agent(alpha=0.000025, beta=0.00025, input_shape=[8], tau=0.001, env=env,
-                batch_size=64, n_actions=2)
+    # print(env.actions())
+    # pass
+    agent = Agent(alpha=25e-3, beta=25e-3, tau=0.005, env=env,
+                batch_size=64, gamma=0.99)
 
-    #agent.load_models()
+    agent.load_models()
     np.random.seed(0)
 
     score_history = []
-    for i in range(1000):
+    for i in range(200):
         obs = env.reset()
         done = False
         score = 0
+        step = 0
         while not done:
+            step+=1
+            # print(obs)
             act = agent.choose_action(obs)
+            # print(act)
             new_state, reward, done, info = env.step(act)
             agent.remember(obs, act, reward, new_state, int(done))
             agent.learn()
             score += reward
             obs = new_state
-            #env.render()
+            env.render()
         score_history.append(score)
 
-        if i % 25 == 0:
-            agent.save_models()
+        # if i % 25 == 0:
+        #     agent.save_models()
 
         print('episode ', i, 'score %.2f' % score,
-            'trailing 100 games avg %.3f' % np.mean(score_history[-100:]))
-
-    filename = 'LunarLander-alpha000025-beta00025-400-300.png'
+            'trailing 128 games avg %.3f' % np.mean(score_history[-128:]),
+            'finished after ', step, ' episode')
+    env.close()
+    agent.save_models()
+    filename = 'MountainCar-alpha000025-beta00025-400-300.png'
     plotLearning(score_history, filename, window=100)
